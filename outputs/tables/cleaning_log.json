@@ -1,0 +1,9 @@
+{
+  "rows_before_cleaning": 247557,
+  "duplicate_rows_removed": 0,
+  "invalid_or_missing_consumption_rows_removed": 18,
+  "rows_after_cleaning": 247539,
+  "columns_after_cleaning": 21,
+  "possible_iqr_outliers_retained_for_review": 5312,
+  "outlier_rule": "No consumption rows were automatically removed; IQR flags are retained for transparent review."
+}
