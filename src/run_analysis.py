@@ -11,10 +11,14 @@ import re
 from pathlib import Path
 
 import joblib
+import matplotlib
+
+matplotlib.use("Agg")  # save figures to files without opening a window
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
 from sklearn.dummy import DummyRegressor
 from sklearn.ensemble import RandomForestRegressor
@@ -76,17 +80,20 @@ def sheet_metadata(sheet_name: str, sheet: pd.DataFrame) -> dict:
     installation_date = pd.to_datetime(sheet.iat[3, 2], errors="coerce") if sheet.shape[0] > 3 else pd.NaT
     pressure_label = str(sheet.iat[2, 1]) if sheet.shape[1] > 1 else ""
     unit_match = re.search(r"\(([^)]+)\)", pressure_label)
-    pressure_unit = unit_match.group(1) if unit_match else np.nan
-    pressure_multiplier = 9.80665 if str(pressure_unit).lower() == "mca" else 1.0
+    sheet_unit = unit_match.group(1) if unit_match else np.nan
+    # PRV4 and PRV5 are labelled "mca", but their values (204.7 to 465.8) sit in the
+    # same range as the kPa sheets. Converting them would give 2,000 to 4,600 kPa,
+    # which is not realistic for a supply network, so all values are read as kPa.
     return {
         "district_area": sheet_name.replace(" ", "").upper(),
         "is_prv_area": is_prv_area,
         "pressure_before_original": pressure_before,
         "pressure_after_original": pressure_after,
-        "pressure_unit": pressure_unit,
-        "pressure_before_kpa": pressure_before * pressure_multiplier,
-        "pressure_after_kpa": pressure_after * pressure_multiplier,
-        "pressure_change_kpa": (pressure_after - pressure_before) * pressure_multiplier if is_prv_area else np.nan,
+        "pressure_unit_in_sheet": sheet_unit,
+        "pressure_unit": "kPa" if is_prv_area else np.nan,
+        "pressure_before_kpa": pressure_before,
+        "pressure_after_kpa": pressure_after,
+        "pressure_change_kpa": (pressure_after - pressure_before) if is_prv_area else 0.0,
         "prv_installation_date": installation_date,
     }
 
@@ -131,6 +138,8 @@ def reshape_workbook(workbook_path: Path) -> tuple[pd.DataFrame, dict]:
         long["post_prv_installation"] = np.where(
             long["is_prv_area"] & (long["date"] >= long["prv_installation_date"]), 1, 0
         )
+        # Stored as 0/1 so that the model pipeline treats it as a numeric feature.
+        long["is_prv_area"] = long["is_prv_area"].astype(int)
         long["connection_key"] = long["district_area"] + "_" + long["connection_id"].astype(str)
         long = long.drop(columns=["month_label"])
         records.append(long)
@@ -222,7 +231,7 @@ def save_eda(df: pd.DataFrame) -> None:
     plt.savefig(FIGURE_DIR / "consumption_by_district_area.png", dpi=180)
     plt.close()
 
-    labels = np.where(df["is_prv_area"], "Pressure-reduction area", "Comparison area")
+    labels = np.where(df["is_prv_area"] == 1, "Pressure-reduction area", "Comparison area")
     plt.figure(figsize=(8, 5))
     sns.boxplot(x=labels, y=df[TARGET], color="#E9C46A")
     plt.title("Consumption in Pressure-Reduction and Comparison Areas")
@@ -299,7 +308,6 @@ def evaluate_models(df: pd.DataFrame) -> tuple[pd.DataFrame, Pipeline]:
 
     x_train, x_test = features.loc[train_mask], features.loc[test_mask]
     y_train, y_test = target.loc[train_mask], target.loc[test_mask]
-    preprocessor = build_preprocessor(features)
     models = {
         "Baseline Median": DummyRegressor(strategy="median"),
         "Linear Regression": LinearRegression(),
@@ -322,22 +330,48 @@ def evaluate_models(df: pd.DataFrame) -> tuple[pd.DataFrame, Pipeline]:
     except ImportError:
         pass
 
+    # Time-series cross-validation uses only the training months. Folds are made of
+    # whole calendar months, so a month is never split between fitting and validation.
+    train_dates = dates.loc[train_mask]
+    train_months = np.array(sorted(train_dates.unique()))
+    month_splitter = TimeSeriesSplit(n_splits=3)
+    month_folds = []
+    fold_rows = []
+    for number, (fit_positions, validation_positions) in enumerate(month_splitter.split(train_months), start=1):
+        fit_months = train_months[fit_positions]
+        validation_months = train_months[validation_positions]
+        fit_mask = train_dates.isin(fit_months).to_numpy()
+        validation_mask = train_dates.isin(validation_months).to_numpy()
+        month_folds.append((fit_mask, validation_mask))
+        fold_rows.append(
+            {
+                "fold": number,
+                "fit_months": len(fit_months),
+                "fit_start": str(pd.Timestamp(fit_months[0]).date()),
+                "fit_end": str(pd.Timestamp(fit_months[-1]).date()),
+                "validation_months": len(validation_months),
+                "validation_start": str(pd.Timestamp(validation_months[0]).date()),
+                "validation_end": str(pd.Timestamp(validation_months[-1]).date()),
+                "fit_rows": int(fit_mask.sum()),
+                "validation_rows": int(validation_mask.sum()),
+            }
+        )
+    pd.DataFrame(fold_rows).to_csv(TABLE_DIR / "cross_validation_folds.csv", index=False)
+
     rows = []
     fitted: dict[str, Pipeline] = {}
-    chronological = model_data.sort_values("date")
-    cv_features = chronological[feature_columns]
-    cv_target = chronological[TARGET]
-    splitter = TimeSeriesSplit(n_splits=3)
     for name, model in models.items():
-        pipeline = Pipeline([("preprocess", preprocessor), ("model", model)])
+        cv_scores = []
+        for fit_mask, validation_mask in month_folds:
+            cv_pipeline = Pipeline([("preprocess", build_preprocessor(features)), ("model", clone(model))])
+            cv_pipeline.fit(x_train.loc[fit_mask], y_train.loc[fit_mask])
+            cv_scores.append(rmse(y_train.loc[validation_mask], cv_pipeline.predict(x_train.loc[validation_mask])))
+
+        # The final model is a fresh copy fitted on all training months.
+        pipeline = Pipeline([("preprocess", build_preprocessor(features)), ("model", clone(model))])
         pipeline.fit(x_train, y_train)
         train_prediction = pipeline.predict(x_train)
         test_prediction = pipeline.predict(x_test)
-        cv_scores = []
-        for train_index, validation_index in splitter.split(cv_features):
-            cv_pipeline = Pipeline([("preprocess", build_preprocessor(cv_features)), ("model", model)])
-            cv_pipeline.fit(cv_features.iloc[train_index], cv_target.iloc[train_index])
-            cv_scores.append(rmse(cv_target.iloc[validation_index], cv_pipeline.predict(cv_features.iloc[validation_index])))
         rows.append(
             {
                 "model": name,
@@ -349,6 +383,7 @@ def evaluate_models(df: pd.DataFrame) -> tuple[pd.DataFrame, Pipeline]:
                 "test_r2": r2_score(y_test, test_prediction),
                 "time_series_cv_rmse_mean": float(np.mean(cv_scores)),
                 "time_series_cv_rmse_std": float(np.std(cv_scores)),
+                "cv_fold_rmse": "; ".join(f"{score:.3f}" for score in cv_scores),
                 "training_rows": int(len(x_train)),
                 "test_rows": int(len(x_test)),
                 "test_period_start": str(pd.Timestamp(dates.loc[test_mask].min()).date()),
@@ -357,14 +392,28 @@ def evaluate_models(df: pd.DataFrame) -> tuple[pd.DataFrame, Pipeline]:
         )
         fitted[name] = pipeline
 
-    results = pd.DataFrame(rows).sort_values("test_rmse").reset_index(drop=True)
+    # The model is chosen on cross-validation within the training months; the
+    # test months are used once, afterwards, to report the final result.
+    results = pd.DataFrame(rows).sort_values("time_series_cv_rmse_mean").reset_index(drop=True)
+    results.insert(1, "selected", [True] + [False] * (len(results) - 1))
     best_name = results.loc[0, "model"]
     best_pipeline = fitted[best_name]
     results.to_csv(TABLE_DIR / "model_comparison.csv", index=False)
     joblib.dump(best_pipeline, MODEL_DIR / "best_monthly_consumption_model.joblib")
 
+    final_model = best_pipeline.named_steps["model"]
+    if hasattr(final_model, "feature_importances_"):
+        importance = pd.Series(
+            final_model.feature_importances_,
+            index=best_pipeline.named_steps["preprocess"].get_feature_names_out(),
+        )
+        grouped = importance.groupby(
+            lambda column: "district_area" if column.startswith("categorical__district_area") else column.split("__", 1)[1]
+        ).sum().sort_values(ascending=False)
+        grouped.rename("importance").to_csv(TABLE_DIR / "feature_importance.csv")
+
     plt.figure(figsize=(9, 5))
-    sns.barplot(data=results, x="test_rmse", y="model", color="#2E74B5")
+    sns.barplot(data=results.sort_values("test_rmse"), x="test_rmse", y="model", color="#2E74B5")
     plt.title("Model Comparison by Hold-Out Test RMSE")
     plt.xlabel("Test RMSE (m3)")
     plt.ylabel("Model")
@@ -396,12 +445,12 @@ def write_report(cleaning_log: dict, results: pd.DataFrame) -> None:
             "## Evaluation Design",
             "",
             "- The models use a chronological training/test split: earlier months for training and later months for testing.",
-            "- A three-split time-series cross-validation check is included to assess stability.",
+            "- Three expanding time-series cross-validation folds of whole months are built inside the training period, and the model with the lowest mean validation RMSE is selected.",
             "- The previous month's consumption is used as a predictor; the first observed month for each connection is excluded from modelling because it has no prior-month value.",
             "",
             "## Best Model",
             "",
-            f"The best hold-out test model was {best['model']}.",
+            f"The selected model was {best['model']} (lowest mean cross-validation RMSE in the training months).",
             f"- Test MAE: {best['test_mae']:.3f} m3",
             f"- Test RMSE: {best['test_rmse']:.3f} m3",
             f"- Test R-squared: {best['test_r2']:.3f}",
