@@ -2,6 +2,6 @@
 previous_month_consumption_m3,0.7674090774074888
 private_tank_volume_litres,0.1886533133603973
 month_index,-0.045090272975870815
-pressure_before_kpa,0.03880386037054147
-pressure_change_kpa,-0.0387802040378631
-pressure_after_kpa,0.03872506884597567
+pressure_after_kpa,0.030139339387913845
+pressure_change_kpa,-0.003814787425822076
+pressure_before_kpa,-0.0011963844190853506

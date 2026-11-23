@@ -1,0 +1,17 @@
+column,dtype,missing_values,missing_percent,unique_values
+connection_id,int64,0,0.0,2995
+private_tank_volume_litres,float64,13416,5.42,21
+monthly_consumption_m3,float64,18,0.01,316
+date,datetime64[us],0,0.0,37
+district_area,str,0,0.0,8
+is_prv_area,int64,0,0.0,2
+pressure_before_original,float64,73462,29.67,4
+pressure_after_original,float64,73462,29.67,4
+pressure_unit_in_sheet,object,73462,29.67,2
+pressure_unit,object,73462,29.67,1
+pressure_before_kpa,float64,73462,29.67,4
+pressure_after_kpa,float64,73462,29.67,4
+pressure_change_kpa,float64,0,0.0,5
+prv_installation_date,datetime64[ns],73462,29.67,2
+post_prv_installation,int64,0,0.0,2
+connection_key,str,0,0.0,10635
