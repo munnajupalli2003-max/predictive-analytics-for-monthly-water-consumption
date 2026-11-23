@@ -134,7 +134,7 @@ if page == "Project showcase":
     second.metric("District areas", str(data["district_area"].nunique()))
     third.metric("Study period", f"{first_date:%Y}-{last_date:%Y}")
     best = results.iloc[0]
-    fourth.metric("Best test RMSE", f"{best['test_rmse']:.2f} m3")
+    fourth.metric("Selected model test RMSE", f"{best['test_rmse']:.2f} m3")
 
     st.subheader("What we completed")
     left, right, third, fourth = st.columns(4)
@@ -161,12 +161,14 @@ if page == "Project showcase":
                     "Comparison of model error on later unseen months")
 
     st.subheader("Key findings")
+    correlations = pd.read_csv(TABLE_DIR / "target_correlations.csv", index_col=0)
+    previous_correlation = correlations.loc["previous_month_consumption_m3", "correlation_with_target"]
     findings = pd.DataFrame(
         [
             {"Finding": "Best model",
-                "Evidence": f"{best['model']} had the lowest test RMSE: {best['test_rmse']:.2f} m3."},
+                "Evidence": f"{best['model']} had the lowest validation error in the training months and reached a test RMSE of {best['test_rmse']:.2f} m3 on the later unseen months."},
             {"Finding": "Strongest pattern",
-                "Evidence": "Previous month's consumption had the strongest numerical relationship with current consumption (correlation 0.767)."},
+                "Evidence": f"Previous month's consumption had the strongest numerical relationship with current consumption (correlation {previous_correlation:.3f})."},
             {"Finding": "Different areas",
                 "Evidence": "The eight district areas have different consumption distributions, so district area is included in the model."},
             {"Finding": "Useful output",
@@ -263,6 +265,8 @@ elif page == "Data preparation":
     st.dataframe(cleaning, use_container_width=True, hide_index=True)
     st.caption(
         "Potential outliers are retained and counted for review; they are not automatically deleted.")
+    st.caption(
+        "Pressure values for all four pressure-reduction areas are used in kPa. PRV4 and PRV5 are labelled 'mca' in the workbook, but their values are in the same range as the kPa sheets.")
 
     summary = pd.DataFrame(metadata.values())
     display_columns = ["district_area", "is_prv_area", "source_rows",
@@ -287,12 +291,16 @@ elif page == "Data preparation":
 
 elif page == "Model performance":
     st.subheader("Model performance")
-    st.write("Each model is trained using earlier months and tested using later months. This better reflects a real forecasting situation.")
+    st.write(
+        "The earliest 28 months are used for training and the latest 8 months are kept for testing. "
+        "Inside the training months, three time-series cross-validation folds of whole months are used to choose the model. "
+        "The test months are used once at the end, to show how the chosen model performs on unseen months.")
     best = results.iloc[0]
-    one, two, three = st.columns(3)
-    one.metric("Best model", best["model"])
-    two.metric("Test MAE", f"{best['test_mae']:.2f} m3")
-    three.metric("Test R-squared", f"{best['test_r2']:.3f}")
+    one, two, three, four = st.columns(4)
+    one.metric("Selected model", best["model"])
+    two.metric("Test RMSE", f"{best['test_rmse']:.2f} m3")
+    three.metric("Test MAE", f"{best['test_mae']:.2f} m3")
+    four.metric("Test R-squared", f"{best['test_r2']:.3f}")
 
     chart_data = results.sort_values("test_rmse")
     st.plotly_chart(
@@ -302,11 +310,26 @@ elif page == "Model performance":
     )
     show_figure("model_comparison_test_rmse.png",
                 "Saved model-comparison figure produced by the analysis pipeline")
-    table = results[["model", "test_mae", "test_rmse", "test_r2",
-                     "time_series_cv_rmse_mean", "test_period_start", "test_period_end"]].copy()
+    table = results[["model", "time_series_cv_rmse_mean", "test_mae", "test_rmse", "test_r2"]].rename(columns={
+        "model": "Model", "time_series_cv_rmse_mean": "Validation RMSE (m3)", "test_mae": "Test MAE (m3)",
+        "test_rmse": "Test RMSE (m3)", "test_r2": "Test R-squared"})
     st.dataframe(table.round(3), use_container_width=True, hide_index=True)
-    st.caption("RMSE gives extra weight to larger errors. R-squared shows how much variation in the held-out data is explained by the model.")
-    st.success(f"This dashboard automatically uses the  trained {best['model']} model. It does not train the model again when the dashboard is opened.")
+    st.markdown(
+        "**How to read these values**\n\n"
+        "- **MAE** is the average size of the error, in cubic metres. An MAE of 3 means a prediction is usually about 3 m3 away from the real value.\n"
+        "- **RMSE** is also in cubic metres, but gives extra weight to large errors, so it is used to choose the model.\n"
+        "- **R-squared** shows how much of the variation in the test months the model explains (1 would be perfect).\n"
+        "- For all error values, lower is better.")
+    folds_path = TABLE_DIR / "cross_validation_folds.csv"
+    if folds_path.exists():
+        with st.expander("Cross-validation folds used to choose the model"):
+            folds = pd.read_csv(folds_path).rename(columns={
+                "fold": "Fold", "fit_months": "Months fitted", "fit_start": "Fit from", "fit_end": "Fit to",
+                "validation_months": "Months validated", "validation_start": "Validate from", "validation_end": "Validate to",
+                "fit_rows": "Rows fitted", "validation_rows": "Rows validated"})
+            st.dataframe(folds, use_container_width=True, hide_index=True)
+            st.caption("Each fold is fitted on earlier whole months and validated on the next whole months. The test months are not used here.")
+    st.success(f"This dashboard uses the saved {best['model']} model. It does not train the model again when the dashboard is opened.")
 
 elif page == "Live prediction":
     st.subheader("Study-context prediction")
@@ -325,11 +348,13 @@ elif page == "Live prediction":
         previous_use = st.number_input(
             "Previous month's consumption (m3)", min_value=0.0,
             value=float(area_data["previous_month_consumption_m3"].median()), step=1.0,
+            help="Water used by one connection in the month before the month you are estimating, in cubic metres. It starts at the median for the selected area.",
         )
     with col_two:
         tank_volume = st.number_input(
             "Private tank volume (litres)", min_value=0.0,
             value=float(area_data["private_tank_volume_litres"].median()), step=100.0,
+            help="Size of the connection's private water tank in litres. Use 0 if there is no tank. It starts at the median for the selected area.",
         )
         st.text_input(
             "Area type", "Pressure-reduction area" if area_meta["is_prv_area"] else "Comparison area", disabled=True)
@@ -361,7 +386,7 @@ elif page == "Live prediction":
         second.metric("Historical area median",
                       f"{area_data[TARGET].median():.2f} m3")
         st.info(historical_message(area_data, prediction))
-      #  st.caption("For use outside the study area or time period, collect local data and retrain or validate the model before relying on the estimate.")
+        st.caption("For use outside the study area or time period, collect local data and retrain or validate the model before relying on the estimate.")
 
 else:
     st.subheader("Evaluation and responsible use")
@@ -382,6 +407,6 @@ else:
     st.markdown(
         "- The model cannot prove that a feature causes higher or lower water use.")
     st.markdown(
-        "- Missing pressure information in comparison areas is handled by the model's preprocessing step.")
+        "- Comparison areas have no pressure readings. Their pressure change is set to zero and the missing before and after values are filled by the model's preprocessing step.")
     st.markdown(
         "- A new area needs local data and validation before the model is used there.")

@@ -10,12 +10,12 @@ The repository includes a complete data pipeline, model comparison, a saved XGBo
 - Cleans invalid or missing consumption records and records data-quality checks.
 - Creates district, time, pressure, tank-volume and previous-month-consumption features.
 - Compares Median Baseline, Linear Regression, Decision Tree, Random Forest and XGBoost models.
-- Evaluates models with a chronological hold-out period, MAE, RMSE and R-squared.
+- Chooses the model with time-series cross-validation of whole months inside the training period, then evaluates it once on a later hold-out period with MAE, RMSE and R-squared.
 - Loads the saved best model in a Streamlit dashboard without retraining it.
 
 ## Main Result
 
-XGBoost achieved the lowest hold-out test RMSE in this project: **6.694 m3**. The result is specific to the supplied Palmas dataset and should be tested again before being used for another location.
+XGBoost was selected because it had the lowest mean validation RMSE (**9.187 m3**) across three time-series cross-validation folds of whole months inside the training period. On the eight later test months, which were not used for selection, it achieved an RMSE of **7.020 m3**, an MAE of **3.697 m3** and an R-squared of **0.654**. The result is specific to the supplied Palmas dataset and should be tested again before being used for another location.
 
 ## Repository Contents
 
@@ -39,7 +39,7 @@ Open PowerShell or Command Prompt and run:
 
 ```powershell
 git clone https://github.com/munnajupalli2003-max/predictive-analytics-for-monthly-water-consumption.git
-cd dissertation-project-code
+cd predictive-analytics-for-monthly-water-consumption
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
@@ -53,7 +53,7 @@ Streamlit will display a local URL in the terminal. Open that URL in a browser. 
 After the first-time setup, run only:
 
 ```powershell
-cd dissertation-project-code
+cd predictive-analytics-for-monthly-water-consumption
 .\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
@@ -63,7 +63,7 @@ The dashboard uses the included cleaned data, saved model, tables and figures. I
 
 ```bash
 git clone https://github.com/munnajupalli2003-max/predictive-analytics-for-monthly-water-consumption.git
-cd dissertation-project-code
+cd predictive-analytics-for-monthly-water-consumption
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
